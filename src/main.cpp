@@ -106,9 +106,14 @@ void loop() {
 
     int32_t t = compensateT(adcT);
 
-    Serial.print("temp: ");
-    Serial.print(t / 100.0);
-    Serial.println(" C");
+    float tempC = t / 100.0f;
+    float tempF = tempC * 1.8f + 32.0f;
+
+    Serial.print("Temp: ");
+    Serial.print(tempC);
+    Serial.print(" C  /  ");
+    Serial.print(tempF);
+    Serial.println(" F");
 
     delay(2000);
 }
