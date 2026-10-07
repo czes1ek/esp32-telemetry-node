@@ -10,7 +10,7 @@
 namespace {
 
 constexpr char kBmp280DatasheetExample[] =
-    "Bosch BMP280 datasheet BST-BMP280-DS001, worked example in "
+    "Bosch BMP280 datasheet BST-BMP280-DS001, worked example in section 3.12 "
     "'Calculating pressure and temperature'";
 
 constexpr int32_t kExampleRawTemperature = 519888;
@@ -21,7 +21,7 @@ constexpr int32_t kExampleCentiCelsius    = 2508;
 constexpr int32_t kExampleCentiPascal     = 10065327;
 
 constexpr char kBme280DatasheetDoubleFormulas[] =
-    "Bosch BME280 datasheet BST-BME280-DS002, appendix "
+    "Bosch BME280 datasheet BST-BME280-DS001, section 8.1 "
     "'Compensation formulas in double precision floating point'";
 
 constexpr int32_t kFineTemperatureTolerance = 1;
