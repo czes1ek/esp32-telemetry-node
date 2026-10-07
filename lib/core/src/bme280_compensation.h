@@ -46,5 +46,7 @@ RawSample parseSample(const SampleBlock& block);
 
 int32_t fineTemperature(const Calibration& calibration, int32_t rawTemperature);
 int32_t temperatureCentiCelsius(int32_t tFine);
+uint32_t pressureQ24_8(const Calibration& calibration, int32_t rawPressure, int32_t tFine);
+uint32_t humidityQ22_10(const Calibration& calibration, int32_t rawHumidity, int32_t tFine);
 
 }

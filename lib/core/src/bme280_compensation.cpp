@@ -1,5 +1,7 @@
 #include "bme280_compensation.h"
 
+#include <algorithm>
+
 namespace bme280 {
 
 static_assert((-1 >> 1) == -1,
@@ -24,6 +26,12 @@ int32_t unsigned20(uint8_t msb, uint8_t lsb, uint8_t xlsb) {
            (static_cast<int32_t>(lsb) << 4) |
            (xlsb >> 4);
 }
+
+constexpr int64_t twoTo(int exponent) {
+    return int64_t{1} << exponent;
+}
+
+constexpr int32_t kFullScaleHumidityQ10_22 = 100 << 22;
 
 }
 
@@ -69,6 +77,42 @@ int32_t fineTemperature(const Calibration& calibration, int32_t rawTemperature) 
 
 int32_t temperatureCentiCelsius(int32_t tFine) {
     return (tFine * 5 + 128) >> 8;
+}
+
+uint32_t pressureQ24_8(const Calibration& calibration, int32_t rawPressure, int32_t tFine) {
+    const Calibration& c = calibration;
+    const int64_t t = static_cast<int64_t>(tFine) - 128000;
+
+    int64_t var2 = t * t * c.p6;
+    var2 += t * c.p5 * twoTo(17);
+    var2 += c.p4 * twoTo(35);
+
+    int64_t var1 = ((t * t * c.p3) >> 8) + t * c.p2 * twoTo(12);
+    var1 = ((twoTo(47) + var1) * c.p1) >> 33;
+    if (var1 == 0) return 0;
+
+    int64_t p = 1048576 - rawPressure;
+    p = ((p * twoTo(31) - var2) * 3125) / var1;
+    var1 = (c.p9 * (p >> 13) * (p >> 13)) >> 25;
+    var2 = (c.p8 * p) >> 19;
+    p = ((p + var1 + var2) >> 8) + c.p7 * twoTo(4);
+    return static_cast<uint32_t>(p);
+}
+
+uint32_t humidityQ22_10(const Calibration& calibration, int32_t rawHumidity, int32_t tFine) {
+    const Calibration& c = calibration;
+    const int32_t t = tFine - 76800;
+
+    const int32_t offsetCorrected =
+        (rawHumidity * (1 << 14) - c.h4 * (1 << 20) - c.h5 * t + 16384) >> 15;
+    const int32_t temperatureTerm =
+        (((t * c.h6) >> 10) * (((t * c.h3) >> 11) + 32768)) >> 10;
+    const int32_t gain = ((temperatureTerm + 2097152) * c.h2 + 8192) >> 14;
+
+    int32_t humidity = offsetCorrected * gain;
+    humidity -= ((((humidity >> 15) * (humidity >> 15)) >> 7) * c.h1) >> 4;
+    humidity = std::clamp(humidity, 0, kFullScaleHumidityQ10_22);
+    return static_cast<uint32_t>(humidity >> 12);
 }
 
 }

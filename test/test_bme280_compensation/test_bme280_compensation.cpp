@@ -1,6 +1,7 @@
 #include <unity.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -17,8 +18,22 @@ constexpr int32_t kExampleRawPressure    = 415148;
 constexpr int32_t kExampleFineTemperature = 128422;
 constexpr int32_t kExampleCentiCelsius    = 2508;
 
+constexpr int32_t kExampleCentiPascal     = 10065327;
+
+constexpr char kBme280DatasheetDoubleFormulas[] =
+    "Bosch BME280 datasheet BST-BME280-DS002, appendix "
+    "'Compensation formulas in double precision floating point'";
+
 constexpr int32_t kFineTemperatureTolerance = 1;
 constexpr int32_t kCentiCelsiusTolerance    = 1;
+constexpr int32_t kCentiPascalTolerance     = 2;
+constexpr int32_t kHumidityToleranceQ22_10  = 16;
+
+constexpr int32_t kColdestFineTemperature = -204800;
+constexpr int32_t kHottestFineTemperature = 435200;
+constexpr int32_t kFineTemperatureStep    = 6400;
+
+constexpr uint32_t kHundredPercentQ22_10 = 100 * 1024;
 
 bme280::Calibration bmp280DatasheetCalibration() {
     bme280::Calibration c{};
@@ -58,6 +73,66 @@ bme280::CalibrationBlockA blockAFrom(const bme280::Calibration& c) {
     putLE(block, 22, c.p9);
     block[25] = c.h1;
     return block;
+}
+
+bme280::Calibration withHumidity(uint8_t h1, int16_t h2, uint8_t h3,
+                                 int16_t h4, int16_t h5, int8_t h6) {
+    bme280::Calibration c = bmp280DatasheetCalibration();
+    c.h1 = h1;
+    c.h2 = h2;
+    c.h3 = h3;
+    c.h4 = h4;
+    c.h5 = h5;
+    c.h6 = h6;
+    return c;
+}
+
+bme280::Calibration typicalHumidityCalibration() {
+    return withHumidity(75, 366, 0, 309, 50, 30);
+}
+
+int32_t centiPascal(uint32_t pressureQ24_8) {
+    return static_cast<int32_t>((static_cast<uint64_t>(pressureQ24_8) * 100 + 128) / 256);
+}
+
+double datasheetPressureDouble(const bme280::Calibration& c, int32_t rawPressure,
+                               int32_t tFine) {
+    double var1 = tFine / 2.0 - 64000.0;
+    double var2 = var1 * var1 * c.p6 / 32768.0;
+    var2 = var2 + var1 * c.p5 * 2.0;
+    var2 = var2 / 4.0 + c.p4 * 65536.0;
+    var1 = (c.p3 * var1 * var1 / 524288.0 + c.p2 * var1) / 524288.0;
+    var1 = (1.0 + var1 / 32768.0) * c.p1;
+    double p = 1048576.0 - rawPressure;
+    p = (p - var2 / 4096.0) * 6250.0 / var1;
+    var1 = c.p9 * p * p / 2147483648.0;
+    var2 = p * c.p8 / 32768.0;
+    return p + (var1 + var2 + c.p7) / 16.0;
+}
+
+double datasheetHumidityDouble(const bme280::Calibration& c, int32_t rawHumidity,
+                               int32_t tFine) {
+    double h = tFine - 76800.0;
+    h = (rawHumidity - (c.h4 * 64.0 + c.h5 / 16384.0 * h)) *
+        (c.h2 / 65536.0 * (1.0 + c.h6 / 67108864.0 * h * (1.0 + c.h3 / 67108864.0 * h)));
+    h = h * (1.0 - c.h1 * h / 524288.0);
+    if (h > 100.0) return 100.0;
+    if (h < 0.0) return 0.0;
+    return h;
+}
+
+void assertHumidityTracksDatasheetDouble(const bme280::Calibration& c) {
+    for (int32_t raw = 15000; raw <= 50000; raw += 250) {
+        for (int32_t tFine = kColdestFineTemperature; tFine <= kHottestFineTemperature;
+             tFine += kFineTemperatureStep) {
+            const long expected = std::lround(datasheetHumidityDouble(c, raw, tFine) * 1024.0);
+            const uint32_t actual = bme280::humidityQ22_10(c, raw, tFine);
+            TEST_ASSERT_INT32_WITHIN_MESSAGE(kHumidityToleranceQ22_10,
+                                             static_cast<int32_t>(expected),
+                                             static_cast<int32_t>(actual),
+                                             kBme280DatasheetDoubleFormulas);
+        }
+    }
 }
 
 }
@@ -178,6 +253,63 @@ void test_temperature_rounds_to_nearest_centidegree() {
     TEST_ASSERT_EQUAL_INT32(-1000, bme280::temperatureCentiCelsius(-51200));
 }
 
+void test_pressure_matches_bmp280_datasheet_example() {
+    const bme280::Calibration c = bmp280DatasheetCalibration();
+    const int32_t tFine = bme280::fineTemperature(c, kExampleRawTemperature);
+
+    const uint32_t pressure = bme280::pressureQ24_8(c, kExampleRawPressure, tFine);
+
+    TEST_ASSERT_INT32_WITHIN_MESSAGE(kCentiPascalTolerance, kExampleCentiPascal,
+                                     centiPascal(pressure), kBmp280DatasheetExample);
+}
+
+void test_pressure_tracks_datasheet_double_formula_across_temperature() {
+    const bme280::Calibration c = bmp280DatasheetCalibration();
+
+    for (int32_t raw = 250000; raw <= 600000; raw += 2500) {
+        for (int32_t tFine = kColdestFineTemperature; tFine <= kHottestFineTemperature;
+             tFine += kFineTemperatureStep) {
+            const long expected = std::lround(datasheetPressureDouble(c, raw, tFine) * 100.0);
+            const uint32_t actual = bme280::pressureQ24_8(c, raw, tFine);
+            TEST_ASSERT_INT32_WITHIN_MESSAGE(kCentiPascalTolerance,
+                                             static_cast<int32_t>(expected),
+                                             centiPascal(actual),
+                                             kBme280DatasheetDoubleFormulas);
+        }
+    }
+}
+
+void test_pressure_is_zero_when_calibration_would_divide_by_zero() {
+    bme280::Calibration c = bmp280DatasheetCalibration();
+    c.p1 = 0;
+
+    TEST_ASSERT_EQUAL_UINT32(0, bme280::pressureQ24_8(c, kExampleRawPressure,
+                                                      kExampleFineTemperature));
+}
+
+void test_humidity_tracks_datasheet_double_formula() {
+    assertHumidityTracksDatasheetDouble(typicalHumidityCalibration());
+}
+
+void test_humidity_tracks_datasheet_double_formula_with_negative_h6() {
+    assertHumidityTracksDatasheetDouble(withHumidity(75, 370, 0, 300, 50, -20));
+}
+
+void test_humidity_tracks_datasheet_double_formula_with_nonzero_h3() {
+    assertHumidityTracksDatasheetDouble(withHumidity(75, 366, 5, 309, 50, 30));
+}
+
+void test_humidity_clamps_at_zero_percent() {
+    TEST_ASSERT_EQUAL_UINT32(0, bme280::humidityQ22_10(typicalHumidityCalibration(), 0,
+                                                       kExampleFineTemperature));
+}
+
+void test_humidity_clamps_at_hundred_percent() {
+    TEST_ASSERT_EQUAL_UINT32(kHundredPercentQ22_10,
+                             bme280::humidityQ22_10(typicalHumidityCalibration(), 65535,
+                                                    kExampleFineTemperature));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_calibration_block_a_is_little_endian_words);
@@ -190,5 +322,13 @@ int main() {
     RUN_TEST(test_fine_temperature_matches_bmp280_datasheet_example);
     RUN_TEST(test_temperature_matches_bmp280_datasheet_example);
     RUN_TEST(test_temperature_rounds_to_nearest_centidegree);
+    RUN_TEST(test_pressure_matches_bmp280_datasheet_example);
+    RUN_TEST(test_pressure_tracks_datasheet_double_formula_across_temperature);
+    RUN_TEST(test_pressure_is_zero_when_calibration_would_divide_by_zero);
+    RUN_TEST(test_humidity_tracks_datasheet_double_formula);
+    RUN_TEST(test_humidity_tracks_datasheet_double_formula_with_negative_h6);
+    RUN_TEST(test_humidity_tracks_datasheet_double_formula_with_nonzero_h3);
+    RUN_TEST(test_humidity_clamps_at_zero_percent);
+    RUN_TEST(test_humidity_clamps_at_hundred_percent);
     return UNITY_END();
 }
