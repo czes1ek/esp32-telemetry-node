@@ -197,6 +197,83 @@ void test_method_task_forwards_to_member_function() {
     TEST_ASSERT_EQUAL_UINT32(300, accumulator.total);
 }
 
+void test_time_until_next_due_reports_nothing_scheduled_without_tasks() {
+    FakeClock clock;
+    const core::Scheduler scheduler(clock);
+
+    TEST_ASSERT_EQUAL_UINT32(core::Scheduler::kNothingScheduledMs,
+                             scheduler.timeUntilNextDueMs());
+}
+
+void test_time_until_next_due_counts_down_to_zero() {
+    FakeClock clock;
+    core::Scheduler scheduler(clock);
+    CountingTask task;
+    scheduler.add(task, 100);
+
+    TEST_ASSERT_EQUAL_UINT32(100, scheduler.timeUntilNextDueMs());
+    clock.now = 60;
+    TEST_ASSERT_EQUAL_UINT32(40, scheduler.timeUntilNextDueMs());
+    clock.now = 100;
+    TEST_ASSERT_EQUAL_UINT32(0, scheduler.timeUntilNextDueMs());
+    clock.now = 130;
+    TEST_ASSERT_EQUAL_UINT32(0, scheduler.timeUntilNextDueMs());
+}
+
+void test_time_until_next_due_reports_the_soonest_task() {
+    FakeClock clock;
+    core::Scheduler scheduler(clock);
+    CountingTask slow;
+    CountingTask fast;
+    scheduler.add(slow, 500);
+    scheduler.add(fast, 200);
+
+    TEST_ASSERT_EQUAL_UINT32(200, scheduler.timeUntilNextDueMs());
+
+    tickAt(clock, scheduler, 450);
+    TEST_ASSERT_EQUAL_UINT32(50, scheduler.timeUntilNextDueMs());
+}
+
+void test_time_until_next_due_follows_the_grid_after_a_late_tick() {
+    FakeClock clock;
+    core::Scheduler scheduler(clock);
+    CountingTask task;
+    scheduler.add(task, 100);
+
+    tickAt(clock, scheduler, 350);
+
+    TEST_ASSERT_EQUAL_UINT32(50, scheduler.timeUntilNextDueMs());
+}
+
+void test_time_until_next_due_survives_millisecond_counter_rollover() {
+    FakeClock clock;
+    clock.now = 0xFFFFFFC0u;
+    core::Scheduler scheduler(clock);
+    CountingTask task;
+    scheduler.add(task, 100);
+
+    clock.now = 0x00000004u;
+    TEST_ASSERT_EQUAL_UINT32(32, scheduler.timeUntilNextDueMs());
+}
+
+void test_sleeping_until_next_due_runs_every_task_on_time() {
+    FakeClock clock;
+    core::Scheduler scheduler(clock);
+    CountingTask fast;
+    CountingTask slow;
+    scheduler.add(fast, 200);
+    scheduler.add(slow, 500);
+
+    while (clock.now < 1000) {
+        clock.now += scheduler.timeUntilNextDueMs();
+        scheduler.tick();
+        TEST_ASSERT_EQUAL_UINT32(0, clock.now % 100);
+    }
+
+    TEST_ASSERT_EQUAL_UINT32(5, fast.runs);
+    TEST_ASSERT_EQUAL_UINT32(2, slow.runs);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_task_waits_one_interval_before_first_run);
@@ -209,5 +286,11 @@ int main() {
     RUN_TEST(test_add_rejects_zero_interval);
     RUN_TEST(test_add_rejects_tasks_beyond_capacity);
     RUN_TEST(test_method_task_forwards_to_member_function);
+    RUN_TEST(test_time_until_next_due_reports_nothing_scheduled_without_tasks);
+    RUN_TEST(test_time_until_next_due_counts_down_to_zero);
+    RUN_TEST(test_time_until_next_due_reports_the_soonest_task);
+    RUN_TEST(test_time_until_next_due_follows_the_grid_after_a_late_tick);
+    RUN_TEST(test_time_until_next_due_survives_millisecond_counter_rollover);
+    RUN_TEST(test_sleeping_until_next_due_runs_every_task_on_time);
     return UNITY_END();
 }

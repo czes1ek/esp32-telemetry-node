@@ -1,5 +1,7 @@
 #include "scheduler.h"
 
+#include <algorithm>
+
 namespace core {
 
 Scheduler::Scheduler(const IClock& clock) : clock_(clock) {}
@@ -22,6 +24,19 @@ void Scheduler::tick() {
         entry.lastDueMs += periodsElapsed * entry.intervalMs;
         entry.task->run(nowMs);
     }
+}
+
+uint32_t Scheduler::timeUntilNextDueMs() const {
+    const uint32_t nowMs = clock_.nowMs();
+    uint32_t soonestMs = kNothingScheduledMs;
+    for (size_t i = 0; i < count_; ++i) {
+        const Entry& entry = entries_[i];
+        const uint32_t elapsedMs = nowMs - entry.lastDueMs;
+        const uint32_t remainingMs =
+            elapsedMs >= entry.intervalMs ? 0 : entry.intervalMs - elapsedMs;
+        soonestMs = std::min(soonestMs, remainingMs);
+    }
+    return soonestMs;
 }
 
 }

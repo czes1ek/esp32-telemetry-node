@@ -30,11 +30,13 @@ private:
 class Scheduler {
 public:
     static constexpr size_t kMaxTasks = 8;
+    static constexpr uint32_t kNothingScheduledMs = UINT32_MAX;
 
     explicit Scheduler(const IClock& clock);
 
     bool add(ITask& task, uint32_t intervalMs);
     void tick();
+    uint32_t timeUntilNextDueMs() const;
 
 private:
     struct Entry {
