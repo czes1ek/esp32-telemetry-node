@@ -24,6 +24,24 @@ constexpr char kBme280DatasheetDoubleFormulas[] =
     "Bosch BME280 datasheet BST-BME280-DS001, section 8.1 "
     "'Compensation formulas in double precision floating point'";
 
+constexpr char kCapturedOnHardware[] =
+    "captured over serial from this project's BME280 on 2026-10-07";
+
+constexpr bme280::CalibrationBlockA kCapturedBlockA{
+    0x43, 0x6F, 0x6A, 0x68, 0x32, 0x00, 0xF2, 0x90, 0xAC, 0xD6, 0xD0, 0x0B, 0xB8,
+    0x25, 0x5C, 0xFF, 0xF9, 0xFF, 0xB4, 0x2D, 0xE8, 0xD1, 0x88, 0x13, 0x00, 0x4B};
+constexpr bme280::CalibrationBlockB kCapturedBlockB{0x6D, 0x01, 0x00, 0x13, 0x27, 0x03, 0x1E};
+constexpr bme280::SampleBlock kCapturedSampleBlock{0x4A, 0x35, 0x00, 0x7F,
+                                                   0x73, 0x00, 0x70, 0xEE};
+
+constexpr int32_t kCapturedCentiCelsius = 2113;
+constexpr int32_t kCapturedPascal       = 98688;
+constexpr int32_t kCapturedCentiPercent = 4996;
+
+constexpr int32_t kPrintedCentiCelsiusTolerance = 1;
+constexpr int32_t kPrintedPascalTolerance       = 1;
+constexpr int32_t kPrintedCentiPercentTolerance = 1;
+
 constexpr int32_t kFineTemperatureTolerance = 1;
 constexpr int32_t kCentiCelsiusTolerance    = 1;
 constexpr int32_t kCentiPascalTolerance     = 2;
@@ -89,6 +107,14 @@ bme280::Calibration withHumidity(uint8_t h1, int16_t h2, uint8_t h3,
 
 bme280::Calibration typicalHumidityCalibration() {
     return withHumidity(75, 366, 0, 309, 50, 30);
+}
+
+int32_t wholePascal(uint32_t pressureQ24_8) {
+    return static_cast<int32_t>((pressureQ24_8 + 128) / 256);
+}
+
+int32_t centiPercent(uint32_t humidityQ22_10) {
+    return static_cast<int32_t>((humidityQ22_10 * 100 + 512) / 1024);
 }
 
 int32_t centiPascal(uint32_t pressureQ24_8) {
@@ -310,6 +336,65 @@ void test_humidity_clamps_at_hundred_percent() {
                                                     kExampleFineTemperature));
 }
 
+void test_captured_calibration_parses_to_expected_trimming_values() {
+    const bme280::Calibration c = bme280::parseCalibration(kCapturedBlockA, kCapturedBlockB);
+
+    TEST_ASSERT_EQUAL_UINT16(28483, c.t1);
+    TEST_ASSERT_EQUAL_INT16(26730, c.t2);
+    TEST_ASSERT_EQUAL_INT16(50, c.t3);
+    TEST_ASSERT_EQUAL_UINT16(37106, c.p1);
+    TEST_ASSERT_EQUAL_INT16(-10580, c.p2);
+    TEST_ASSERT_EQUAL_INT16(3024, c.p3);
+    TEST_ASSERT_EQUAL_INT16(9656, c.p4);
+    TEST_ASSERT_EQUAL_INT16(-164, c.p5);
+    TEST_ASSERT_EQUAL_INT16(-7, c.p6);
+    TEST_ASSERT_EQUAL_INT16(11700, c.p7);
+    TEST_ASSERT_EQUAL_INT16(-11800, c.p8);
+    TEST_ASSERT_EQUAL_INT16(5000, c.p9);
+    TEST_ASSERT_EQUAL_UINT8(75, c.h1);
+    TEST_ASSERT_EQUAL_INT16(365, c.h2);
+    TEST_ASSERT_EQUAL_UINT8(0, c.h3);
+    TEST_ASSERT_EQUAL_INT16(311, c.h4);
+    TEST_ASSERT_EQUAL_INT16(50, c.h5);
+    TEST_ASSERT_EQUAL_INT8(30, c.h6);
+}
+
+void test_captured_sample_reproduces_readings_printed_on_hardware() {
+    const bme280::Calibration c = bme280::parseCalibration(kCapturedBlockA, kCapturedBlockB);
+    const bme280::RawSample raw = bme280::parseSample(kCapturedSampleBlock);
+    const int32_t tFine = bme280::fineTemperature(c, raw.temperature);
+
+    TEST_ASSERT_INT32_WITHIN_MESSAGE(kPrintedCentiCelsiusTolerance, kCapturedCentiCelsius,
+                                     bme280::temperatureCentiCelsius(tFine),
+                                     kCapturedOnHardware);
+    TEST_ASSERT_INT32_WITHIN_MESSAGE(
+        kPrintedPascalTolerance, kCapturedPascal,
+        wholePascal(bme280::pressureQ24_8(c, raw.pressure, tFine)), kCapturedOnHardware);
+    TEST_ASSERT_INT32_WITHIN_MESSAGE(
+        kPrintedCentiPercentTolerance, kCapturedCentiPercent,
+        centiPercent(bme280::humidityQ22_10(c, raw.humidity, tFine)), kCapturedOnHardware);
+}
+
+void test_captured_sample_agrees_with_datasheet_double_formulas() {
+    const bme280::Calibration c = bme280::parseCalibration(kCapturedBlockA, kCapturedBlockB);
+    const bme280::RawSample raw = bme280::parseSample(kCapturedSampleBlock);
+    const int32_t tFine = bme280::fineTemperature(c, raw.temperature);
+
+    const long expectedCentiPascal =
+        std::lround(datasheetPressureDouble(c, raw.pressure, tFine) * 100.0);
+    const long expectedHumidity =
+        std::lround(datasheetHumidityDouble(c, raw.humidity, tFine) * 1024.0);
+
+    TEST_ASSERT_INT32_WITHIN_MESSAGE(
+        kCentiPascalTolerance, static_cast<int32_t>(expectedCentiPascal),
+        centiPascal(bme280::pressureQ24_8(c, raw.pressure, tFine)),
+        kBme280DatasheetDoubleFormulas);
+    TEST_ASSERT_INT32_WITHIN_MESSAGE(
+        kHumidityToleranceQ22_10, static_cast<int32_t>(expectedHumidity),
+        static_cast<int32_t>(bme280::humidityQ22_10(c, raw.humidity, tFine)),
+        kBme280DatasheetDoubleFormulas);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_calibration_block_a_is_little_endian_words);
@@ -330,5 +415,8 @@ int main() {
     RUN_TEST(test_humidity_tracks_datasheet_double_formula_with_nonzero_h3);
     RUN_TEST(test_humidity_clamps_at_zero_percent);
     RUN_TEST(test_humidity_clamps_at_hundred_percent);
+    RUN_TEST(test_captured_calibration_parses_to_expected_trimming_values);
+    RUN_TEST(test_captured_sample_reproduces_readings_printed_on_hardware);
+    RUN_TEST(test_captured_sample_agrees_with_datasheet_double_formulas);
     return UNITY_END();
 }
