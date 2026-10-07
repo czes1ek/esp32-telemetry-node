@@ -1,31 +1,22 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include <array>
+
+#include "bme280_compensation.h"
+
 namespace reg {
     constexpr uint8_t CHIP_ID   = 0xD0;
     constexpr uint8_t CTRL_HUM  = 0xF2;
     constexpr uint8_t CTRL_MEAS = 0xF4;
-    constexpr uint8_t TEMP_MSB  = 0xFA;
-    constexpr uint8_t CAL_T1    = 0x88;
 }
 
 constexpr uint8_t kAddr   = 0x76;
+constexpr uint8_t kChipId = 0x60;
 constexpr int     kSdaPin = 21;
 constexpr int     kSclPin = 22;
 
-uint16_t dig_T1;
-int16_t  dig_T2, dig_T3;
-int32_t  tFine;
-
-uint16_t read16LE(uint8_t reg) {
-    Wire.beginTransmission(kAddr);
-    Wire.write(reg);
-    Wire.endTransmission(false);
-    Wire.requestFrom(kAddr, (uint8_t)2);
-    uint8_t lo = Wire.read();
-    uint8_t hi = Wire.read();
-    return (uint16_t)(hi << 8 | lo);
-}
+bme280::Calibration calibration;
 
 bool readBurst(uint8_t reg, uint8_t* buf, uint8_t len) {
     Wire.beginTransmission(kAddr);
@@ -36,84 +27,98 @@ bool readBurst(uint8_t reg, uint8_t* buf, uint8_t len) {
     return true;
 }
 
-int32_t compensateT(int32_t adcT) {
-    int32_t v1 = ((((adcT >> 3) - ((int32_t)dig_T1 << 1))) *
-                  (int32_t)dig_T2) >> 11;
-    int32_t v2 = (((((adcT >> 4) - (int32_t)dig_T1) *
-                    ((adcT >> 4) - (int32_t)dig_T1)) >> 12) *
-                  (int32_t)dig_T3) >> 14;
-    tFine = v1 + v2;
-    return (tFine * 5 + 128) >> 8;
+template <size_t N>
+bool readBlock(uint8_t reg, std::array<uint8_t, N>& block) {
+    return readBurst(reg, block.data(), (uint8_t)N);
+}
+
+bool writeRegister(uint8_t reg, uint8_t value) {
+    Wire.beginTransmission(kAddr);
+    Wire.write(reg);
+    Wire.write(value);
+    return Wire.endTransmission() == 0;
+}
+
+template <size_t N>
+void printHex(const std::array<uint8_t, N>& block) {
+    for (uint8_t byte : block) {
+        if (byte < 0x10) Serial.print('0');
+        Serial.print(byte, HEX);
+        Serial.print(' ');
+    }
+}
+
+[[noreturn]] void halt(const char* reason) {
+    Serial.print("FATAL: ");
+    Serial.println(reason);
+    while (true) delay(1000);
 }
 
 void setup() {
     Serial.begin(115200);
     delay(2000);
     Serial.println();
-    Serial.println("=== BME280 temperature ===");
+    Serial.println("=== BME280 temperature, pressure, humidity ===");
 
     Wire.begin(kSdaPin, kSclPin);
     Wire.setClock(100000);
     delay(100);
 
     uint8_t id = 0;
-    if (!readBurst(reg::CHIP_ID, &id, 1)) {
-        Serial.println("FATAL: no response from sensor");
-        while (true) delay(1000);
-    }
-    if (id != 0x60) {
-        Serial.print("FATAL: unexpected chip id 0x");
+    if (!readBurst(reg::CHIP_ID, &id, 1)) halt("no response from sensor");
+    if (id != kChipId) {
+        Serial.print("chip id 0x");
         Serial.println(id, HEX);
-        while (true) delay(1000);
+        halt("unexpected chip id");
     }
 
-    dig_T1 = read16LE(reg::CAL_T1);
-    dig_T2 = (int16_t)read16LE(reg::CAL_T1 + 2);
-    dig_T3 = (int16_t)read16LE(reg::CAL_T1 + 4);
+    bme280::CalibrationBlockA blockA;
+    bme280::CalibrationBlockB blockB;
+    if (!readBlock(bme280::kCalibrationBlockARegister, blockA)) halt("calibration block A read failed");
+    if (!readBlock(bme280::kCalibrationBlockBRegister, blockB)) halt("calibration block B read failed");
+    calibration = bme280::parseCalibration(blockA, blockB);
 
-    Serial.print("calibration  T1=");
-    Serial.print(dig_T1);
-    Serial.print("  T2=");
-    Serial.print(dig_T2);
-    Serial.print("  T3=");
-    Serial.println(dig_T3);
+    Serial.print("calibration A: ");
+    printHex(blockA);
+    Serial.println();
+    Serial.print("calibration B: ");
+    printHex(blockB);
+    Serial.println();
 
-    Wire.beginTransmission(kAddr);
-    Wire.write(reg::CTRL_HUM);
-    Wire.write(0x01);
-    Wire.endTransmission();
-
-    Wire.beginTransmission(kAddr);
-    Wire.write(reg::CTRL_MEAS);
-    Wire.write(0x27);
-    Wire.endTransmission();
+    if (!writeRegister(reg::CTRL_HUM, 0x01)) halt("ctrl_hum write failed");
+    if (!writeRegister(reg::CTRL_MEAS, 0x27)) halt("ctrl_meas write failed");
 
     delay(100);
     Serial.println("ready");
 }
 
 void loop() {
-    uint8_t d[3];
-    if (!readBurst(reg::TEMP_MSB, d, 3)) {
+    bme280::SampleBlock block;
+    if (!readBlock(bme280::kSampleRegister, block)) {
         Serial.println("read failed");
         delay(2000);
         return;
     }
 
-    int32_t adcT = ((int32_t)d[0] << 12) |
-                   ((int32_t)d[1] << 4)  |
-                   (d[2] >> 4);
+    const bme280::RawSample raw = bme280::parseSample(block);
+    const int32_t tFine = bme280::fineTemperature(calibration, raw.temperature);
 
-    int32_t t = compensateT(adcT);
+    const float tempC = bme280::temperatureCentiCelsius(tFine) / 100.0f;
+    const float tempF = tempC * 1.8f + 32.0f;
+    const float stationHpa = bme280::pressureQ24_8(calibration, raw.pressure, tFine) / 25600.0f;
+    const float humidity = bme280::humidityQ22_10(calibration, raw.humidity, tFine) / 1024.0f;
 
-    float tempC = t / 100.0f;
-    float tempF = tempC * 1.8f + 32.0f;
-
-    Serial.print("Temp: ");
+    Serial.print("raw: ");
+    printHex(block);
+    Serial.print(" Temp: ");
     Serial.print(tempC);
     Serial.print(" C  /  ");
     Serial.print(tempF);
-    Serial.println(" F");
+    Serial.print(" F   Station pressure: ");
+    Serial.print(stationHpa);
+    Serial.print(" hPa   Humidity: ");
+    Serial.print(humidity);
+    Serial.println(" %RH");
 
     delay(2000);
 }
