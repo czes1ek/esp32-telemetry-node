@@ -30,13 +30,14 @@ size_t formatPayload(char* out, size_t capacity, const char* deviceId, const Rea
         out, capacity,
         "{\"device\":\"%s\",\"uptime_ms\":%lu,\"temperature_c\":%s%lu.%02lu,"
         "\"station_pressure_pa\":%lu.%02lu,\"humidity_pct\":%lu.%02lu,"
-        "\"dropped\":%lu,\"sensor_errors\":%lu}",
+        "\"dropped\":%lu,\"sensor_errors\":%lu,\"format_errors\":%lu}",
         deviceId, static_cast<unsigned long>(reading.uptimeMs),
         sign, whole(centiCelsius), fraction(centiCelsius),
         whole(centiPascal), fraction(centiPascal),
         whole(centiPercent), fraction(centiPercent),
         static_cast<unsigned long>(counters.dropped),
-        static_cast<unsigned long>(counters.sensorErrors));
+        static_cast<unsigned long>(counters.sensorErrors),
+        static_cast<unsigned long>(counters.formatErrors));
 
     if (written < 0 || static_cast<size_t>(written) >= capacity) return 0;
     return static_cast<size_t>(written);

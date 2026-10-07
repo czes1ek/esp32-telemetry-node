@@ -24,7 +24,7 @@ core::Reading readingAt(uint32_t uptimeMs) {
     return core::Reading{uptimeMs, core::Measurement{2113, 25264070, 51156}};
 }
 
-std::string formatted(const core::Reading& reading, const core::Counters& counters = {0, 0}) {
+std::string formatted(const core::Reading& reading, const core::Counters& counters = {0, 0, 0}) {
     char out[core::kPayloadCapacity];
     const size_t length = core::formatPayload(out, sizeof out, kDeviceId, reading, counters);
     return std::string(out, length);
@@ -49,6 +49,15 @@ struct Rig {
     core::ReadingBuffer buffer;
     core::Sampler sampler{sensor, buffer};
     core::Publisher publisher{kDeviceId, buffer, sampler, transport};
+};
+
+struct RigWithUnformattableDeviceId {
+    std::string deviceId = std::string(core::kPayloadCapacity, 'x');
+    FakeSensor sensor;
+    FakeTransport transport;
+    core::ReadingBuffer buffer;
+    core::Sampler sampler{sensor, buffer};
+    core::Publisher publisher{deviceId.c_str(), buffer, sampler, transport};
 };
 
 struct ScheduledRig {
@@ -85,19 +94,19 @@ void setUp() {}
 void tearDown() {}
 
 void test_payload_is_json_with_fixed_point_values_as_decimals() {
-    const std::string payload = formatted(readingAt(123456), core::Counters{3, 2});
+    const std::string payload = formatted(readingAt(123456), core::Counters{3, 2, 1});
 
     TEST_ASSERT_EQUAL_STRING(
         "{\"device\":\"esp32-test\",\"uptime_ms\":123456,\"temperature_c\":21.13,"
         "\"station_pressure_pa\":98687.77,\"humidity_pct\":49.96,"
-        "\"dropped\":3,\"sensor_errors\":2}",
+        "\"dropped\":3,\"sensor_errors\":2,\"format_errors\":1}",
         payload.c_str());
 }
 
 void test_payload_length_matches_the_text_written() {
     char out[core::kPayloadCapacity];
     const size_t length =
-        core::formatPayload(out, sizeof out, kDeviceId, readingAt(1), core::Counters{0, 0});
+        core::formatPayload(out, sizeof out, kDeviceId, readingAt(1), core::Counters{0, 0, 0});
 
     TEST_ASSERT_EQUAL_UINT32(std::strlen(out), length);
 }
@@ -114,7 +123,7 @@ void test_payload_reports_zero_length_when_it_does_not_fit() {
     char out[32];
 
     TEST_ASSERT_EQUAL_UINT32(
-        0, core::formatPayload(out, sizeof out, kDeviceId, readingAt(1), core::Counters{0, 0}));
+        0, core::formatPayload(out, sizeof out, kDeviceId, readingAt(1), core::Counters{0, 0, 0}));
 }
 
 void test_largest_possible_payload_fits_the_payload_capacity() {
@@ -125,7 +134,7 @@ void test_largest_possible_payload_fits_the_payload_capacity() {
     char out[core::kPayloadCapacity];
 
     const size_t length = core::formatPayload(out, sizeof out, longestId.c_str(), reading,
-                                              core::Counters{max, max});
+                                              core::Counters{max, max, max});
 
     TEST_ASSERT_GREATER_THAN_UINT32(0, length);
     TEST_ASSERT_TRUE(contains(out, "\"temperature_c\":-21474836.48,"));
@@ -178,6 +187,27 @@ void test_failed_publish_stops_the_run_and_keeps_that_reading_for_retry() {
     TEST_ASSERT_EQUAL_UINT32(3, rig.buffer.front().uptimeMs);
 }
 
+void test_reading_that_cannot_be_formatted_is_dropped_and_counted() {
+    RigWithUnformattableDeviceId rig;
+    for (uint32_t i = 1; i <= 3; ++i) rig.buffer.push(readingAt(i));
+
+    rig.publisher.publishPending(0);
+
+    TEST_ASSERT_TRUE(rig.buffer.empty());
+    TEST_ASSERT_EQUAL_UINT32(3, rig.publisher.formatErrorCount());
+    TEST_ASSERT_EQUAL_UINT32(0, rig.transport.publishCalls);
+}
+
+void test_format_error_count_starts_at_zero_and_stays_there_when_payloads_fit() {
+    Rig rig;
+    rig.buffer.push(readingAt(1));
+
+    rig.publisher.publishPending(0);
+
+    TEST_ASSERT_EQUAL_UINT32(0, rig.publisher.formatErrorCount());
+    TEST_ASSERT_TRUE(contains(rig.transport.payloads.front(), "\"format_errors\":0}"));
+}
+
 void test_empty_buffer_never_touches_the_transport() {
     Rig rig;
 
@@ -196,7 +226,7 @@ void test_payload_carries_current_drop_and_sensor_error_counts() {
     rig.publisher.publishPending(0);
 
     TEST_ASSERT_TRUE(contains(rig.transport.payloads.front(), "\"dropped\":3,"));
-    TEST_ASSERT_TRUE(contains(rig.transport.payloads.front(), "\"sensor_errors\":2}"));
+    TEST_ASSERT_TRUE(contains(rig.transport.payloads.front(), "\"sensor_errors\":2,"));
 }
 
 void test_steady_state_with_production_intervals_drops_nothing() {
@@ -259,6 +289,8 @@ int main() {
     RUN_TEST(test_one_run_sends_at_most_the_per_run_cap);
     RUN_TEST(test_nothing_is_sent_or_removed_while_the_transport_is_not_ready);
     RUN_TEST(test_failed_publish_stops_the_run_and_keeps_that_reading_for_retry);
+    RUN_TEST(test_reading_that_cannot_be_formatted_is_dropped_and_counted);
+    RUN_TEST(test_format_error_count_starts_at_zero_and_stays_there_when_payloads_fit);
     RUN_TEST(test_empty_buffer_never_touches_the_transport);
     RUN_TEST(test_payload_carries_current_drop_and_sensor_error_counts);
     RUN_TEST(test_steady_state_with_production_intervals_drops_nothing);
